@@ -1,0 +1,158 @@
+import numpy as np
+
+# Create a small 3x3 grid map
+# 0 = empty road, P = pick-up point, T = taxi starting position
+grid = [
+    ['0', 'P', '0'],
+    ['0', '0', 'P'],
+    ['T', '0', '0']
+]
+
+# Directions: Up, Down, Left, Right
+actions = ['U', 'D', 'L', 'R']
+action_to_move = {
+    'U': (-1, 0),
+    'D': (1, 0),
+    'L': (0, -1),
+    'R': (0, 1)
+}
+
+# MDP parameters
+gamma = 0.9  # Discount factor
+theta = 0.01  # Convergence threshold
+
+# Initialize value function (3x3 grid)
+V = np.zeros((3, 3))
+
+# Find all pick-up points and taxi start
+pickup_locations = []
+taxi_location = None
+
+for i in range(3):
+    for j in range(3):
+        if grid[i][j] == 'P':
+            pickup_locations.append((i, j))
+        elif grid[i][j] == 'T':
+            taxi_location = (i, j)
+
+print("Initial setup:")
+print(f"Taxi starts at: {taxi_location}")
+print(f"Pick-up points: {pickup_locations}")
+print(f"Initial value function:\n{V}\n")
+
+# Value Iteration Algorithm
+iteration = 0
+while True:
+    delta = 0
+    new_V = V.copy()
+    
+    # Loop through all states
+    for i in range(3):
+        for j in range(3):
+            if grid[i][j] == 'P':
+                # Pick-up point: terminal state with high reward
+                new_V[i][j] = 10.0
+                continue
+            
+            # Try all possible actions from this state
+            best_value = -float('inf')
+            
+            for action in actions:
+                move_i, move_j = action_to_move[action]
+                next_i, next_j = i + move_i, j + move_j
+                
+                # Check if move is valid (within grid)
+                if 0 <= next_i < 3 and 0 <= next_j < 3:
+                    next_state_value = V[next_i][next_j]
+                    
+                    # Calculate value for this action
+                    # Reward: +5 for reaching pick-up, -1 for each move
+                    if grid[next_i][next_j] == 'P':
+                        reward = 5  # Reached pick-up point
+                    else:
+                        reward = -1  # Movement cost
+                    
+                    action_value = reward + gamma * next_state_value
+                    
+                    # Keep the best action value
+                    if action_value > best_value:
+                        best_value = action_value
+            
+            # Update value for this state
+            new_V[i][j] = best_value
+            delta = max(delta, abs(best_value - V[i][j]))
+    
+    V = new_V.copy()
+    iteration += 1
+    
+    print(f"Iteration {iteration}:")
+    print(f"Value function:\n{np.round(V, 2)}")
+    print(f"Max change: {delta:.4f}\n")
+    
+    # Check for convergence
+    if delta < theta:
+        print(f"Converged after {iteration} iterations!")
+        break
+
+# Extract optimal policy from value function
+print("\nOptimal Policy:")
+policy_grid = [[' ' for _ in range(3)] for _ in range(3)]
+
+for i in range(3):
+    for j in range(3):
+        if grid[i][j] == 'P':
+            policy_grid[i][j] = 'P'  # Pick-up point
+            continue
+        
+        best_action = None
+        best_value = -float('inf')
+        
+        for action in actions:
+            move_i, move_j = action_to_move[action]
+            next_i, next_j = i + move_i, j + move_j
+            
+            if 0 <= next_i < 3 and 0 <= next_j < 3:
+                if grid[next_i][next_j] == 'P':
+                    reward = 5
+                else:
+                    reward = -1
+                
+                action_value = reward + gamma * V[next_i][next_j]
+                
+                if action_value > best_value:
+                    best_value = action_value
+                    best_action = action
+        
+        policy_grid[i][j] = best_action
+
+# Display the grid with policy
+print("Grid (P=Pick-up, T=Taxi start):")
+for row in grid:
+    print(' '.join(row))
+
+print("\nOptimal Policy (arrows show best move):")
+for row in policy_grid:
+    print(' '.join(row))
+
+# Show path from taxi to nearest pick-up
+print(f"\nOptimal path from taxi at {taxi_location}:")
+current = taxi_location
+path = [current]
+
+while current not in pickup_locations and len(path) < 10:
+    i, j = current
+    action = policy_grid[i][j]
+    
+    if action == ' ' or action == 'P':
+        break
+    
+    move_i, move_j = action_to_move[action]
+    next_i, next_j = i + move_i, j + move_j
+    current = (next_i, next_j)
+    path.append(current)
+
+print(" -> ".join([str(p) for p in path]))
+
+# Print final value function
+print(f"\nFinal Value Function:")
+print(np.round(V, 2))
