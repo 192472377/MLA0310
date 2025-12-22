@@ -1,0 +1,118 @@
+import numpy as np
+import random
+
+# Simulate customer behavior: lower prices = higher chance to buy
+prices = [10, 20, 30, 40, 50]  # Available prices
+true_conversion = [0.8, 0.6, 0.4, 0.2, 0.1]  # True conversion rates
+
+# Track performance
+results = {"epsilon": [], "ucb": [], "thompson": []}
+
+def customer_buys(price_idx):
+    """Simulate if customer buys at given price"""
+    chance = true_conversion[price_idx]
+    return random.random() < chance
+
+# Epsilon-Greedy Strategy
+def epsilon_greedy(trials=1000, epsilon=0.1):
+    earnings = [0] * len(prices)
+    tries = [0] * len(prices)
+    total_revenue = 0
+    
+    for i in range(trials):
+        # Explore (try random) or Exploit (use best)
+        if random.random() < epsilon:
+            choice = random.randint(0, len(prices)-1)
+        else:
+            # Choose price with best average revenue
+            avg_revenue = [earnings[j]/tries[j] if tries[j]>0 else 0 for j in range(len(prices))]
+            choice = np.argmax(avg_revenue)
+        
+        # Simulate purchase
+        if customer_buys(choice):
+            revenue = prices[choice]
+            earnings[choice] += revenue
+            total_revenue += revenue
+        
+        tries[choice] += 1
+    
+    return total_revenue
+
+# UCB Strategy
+def ucb(trials=1000):
+    earnings = [0] * len(prices)
+    tries = [1] * len(prices)  # Start with 1 try each
+    total_revenue = 0
+    
+    # Try each price once first
+    for i in range(len(prices)):
+        if customer_buys(i):
+            revenue = prices[i]
+            earnings[i] = revenue
+            total_revenue += revenue
+    
+    for i in range(len(prices), trials):
+        # Calculate UCB for each price
+        ucb_values = []
+        for j in range(len(prices)):
+            avg = earnings[j] / tries[j]
+            confidence = np.sqrt(2 * np.log(i) / tries[j])
+            ucb_values.append(avg + confidence)
+        
+        choice = np.argmax(ucb_values)
+        
+        if customer_buys(choice):
+            revenue = prices[choice]
+            earnings[choice] += revenue
+            total_revenue += revenue
+        
+        tries[choice] += 1
+    
+    return total_revenue
+
+# Thompson Sampling Strategy
+def thompson_sampling(trials=1000):
+    # Track successes and failures for each price
+    successes = [1] * len(prices)  # Start with 1 success (prior)
+    failures = [1] * len(prices)   # Start with 1 failure (prior)
+    total_revenue = 0
+    
+    for i in range(trials):
+        # Sample from distributions for each price
+        samples = []
+        for j in range(len(prices)):
+            # Sample conversion rate from Beta distribution
+            conv_rate = np.random.beta(successes[j], failures[j])
+            # Expected revenue = conversion rate × price
+            samples.append(conv_rate * prices[j])
+        
+        choice = np.argmax(samples)
+        
+        if customer_buys(choice):
+            revenue = prices[choice]
+            successes[choice] += 1
+            total_revenue += revenue
+        else:
+            failures[choice] += 1
+    
+    return total_revenue
+
+# Run simulations
+n_runs = 10
+for run in range(n_runs):
+    results["epsilon"].append(epsilon_greedy(500))
+    results["ucb"].append(ucb(500))
+    results["thompson"].append(thompson_sampling(500))
+
+# Compare results
+print("=== Multi-Armed Bandit Pricing Simulation ===")
+print(f"Prices available: {prices}")
+print(f"True conversion rates: {true_conversion}")
+print(f"\nAverage Revenue over {n_runs} runs:")
+print(f"Epsilon-Greedy: ${np.mean(results['epsilon']):.2f}")
+print(f"UCB: ${np.mean(results['ucb']):.2f}")
+print(f"Thompson Sampling: ${np.mean(results['thompson']):.2f}")
+
+# Find best strategy
+best_strategy = max(results, key=lambda k: np.mean(results[k]))
+print(f"\nBest strategy: {best_strategy.capitalize()}")
