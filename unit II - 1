@@ -1,0 +1,224 @@
+import numpy as np
+
+# States: (queue_length_north, queue_length_south, current_light)
+# queue_length: 0, 1, or 2 vehicles
+# current_light: 'NS' (North-South green) or 'EW' (East-West green)
+
+states = []
+for ns_queue in range(3):  # North-South queue (0-2 vehicles)
+    for ew_queue in range(3):  # East-West queue (0-2 vehicles)
+        for light in ['NS', 'EW']:  # Current light state
+            states.append((ns_queue, ew_queue, light))
+
+# Actions: 'STAY' (keep current light), 'SWITCH' (change light)
+actions = ['STAY', 'SWITCH']
+
+# Parameters
+gamma = 0.9  # Discount factor
+max_iterations = 100
+theta = 0.001  # Convergence threshold
+
+# Initialize value function and policy
+V = {state: 0 for state in states}
+policy = {state: np.random.choice(actions) for state in states}
+
+# Helper: Get next queue lengths (simulate vehicle arrivals)
+def get_next_queues(ns_queue, ew_queue):
+    # Vehicles arrive randomly: 0 or 1 new vehicle per direction
+    new_ns = ns_queue + np.random.choice([0, 1])
+    new_ew = ew_queue + np.random.choice([0, 1])
+    
+    # Clamp to maximum queue length of 2
+    new_ns = min(new_ns, 2)
+    new_ew = min(new_ew, 2)
+    
+    return new_ns, new_ew
+
+# Reward function: Negative reward based on total wait time
+def get_reward(ns_queue, ew_queue, light):
+    total_wait = 0
+    
+    if light == 'NS':
+        # North-South vehicles move, East-West wait
+        total_wait = ew_queue * 2  # Each waiting vehicle gets 2 penalty
+        # NS queue reduces by 1 if there are vehicles
+        ns_queue = max(0, ns_queue - 1)
+    else:  # light == 'EW'
+        # East-West vehicles move, North-South wait
+        total_wait = ns_queue * 2
+        # EW queue reduces by 1 if there are vehicles
+        ew_queue = max(0, ew_queue - 1)
+    
+    return -total_wait, ns_queue, ew_queue  # Negative reward for wait time
+
+print("Traffic Light Optimization using Policy Iteration")
+print("=" * 50)
+print(f"States: {len(states)} possible states")
+print(f"Actions: {actions}")
+print(f"Discount factor (gamma): {gamma}")
+print()
+
+# Policy Iteration Algorithm
+for iteration in range(max_iterations):
+    print(f"Iteration {iteration + 1}")
+    print("-" * 30)
+    
+    # Policy Evaluation
+    while True:
+        delta = 0
+        
+        for state in states:
+            ns_queue, ew_queue, light = state
+            action = policy[state]
+            
+            # Determine next light state based on action
+            if action == 'STAY':
+                next_light = light
+            else:  # SWITCH
+                next_light = 'EW' if light == 'NS' else 'NS'
+            
+            # Get immediate reward and updated queues
+            reward, new_ns, new_ew = get_reward(ns_queue, ew_queue, next_light)
+            
+            # Get new queue lengths (with random arrivals)
+            next_ns, next_ew = get_next_queues(new_ns, new_ew)
+            next_state = (next_ns, next_ew, next_light)
+            
+            # Bellman equation for policy evaluation
+            new_value = reward + gamma * V[next_state]
+            
+            delta = max(delta, abs(V[state] - new_value))
+            V[state] = new_value
+        
+        if delta < theta:
+            break
+    
+    # Policy Improvement
+    policy_stable = True
+    
+    for state in states:
+        ns_queue, ew_queue, light = state
+        old_action = policy[state]
+        
+        # Find best action for this state
+        best_value = -float('inf')
+        best_action = old_action
+        
+        for action in actions:
+            # Determine next light state based on action
+            if action == 'STAY':
+                next_light = light
+            else:  # SWITCH
+                next_light = 'EW' if light == 'NS' else 'NS'
+            
+            # Get immediate reward and updated queues
+            reward, new_ns, new_ew = get_reward(ns_queue, ew_queue, next_light)
+            
+            # Get new queue lengths (with random arrivals)
+            next_ns, next_ew = get_next_queues(new_ns, new_ew)
+            next_state = (next_ns, next_ew, next_light)
+            
+            # Calculate action value
+            action_value = reward + gamma * V[next_state]
+            
+            if action_value > best_value:
+                best_value = action_value
+                best_action = action
+        
+        # Update policy
+        policy[state] = best_action
+        
+        if best_action != old_action:
+            policy_stable = False
+    
+    # Display some example states
+    print("Example states and their optimal actions:")
+    example_states = [
+        (2, 0, 'NS'),  # Long NS queue, no EW queue, NS light
+        (0, 2, 'NS'),  # Long EW queue, no NS queue, NS light
+        (1, 1, 'NS'),  # Equal queues, NS light
+        (1, 1, 'EW'),  # Equal queues, EW light
+    ]
+    
+    for state in example_states:
+        action = policy[state]
+        value = V[state]
+        print(f"  State {state}: {action} (value: {value:.2f})")
+    
+    print()
+    
+    if policy_stable:
+        print(f"Policy converged after {iteration + 1} iterations!")
+        break
+
+# Final Policy Analysis
+print("\n" + "=" * 50)
+print("FINAL OPTIMAL POLICY ANALYSIS")
+print("=" * 50)
+
+print("\nPolicy interpretation:")
+print("- STAY: Keep current light green")
+print("- SWITCH: Change to other light")
+
+print("\nOptimal policy for all states:")
+print("(NS_queue, EW_queue, current_light) -> optimal_action")
+
+for ns in range(3):
+    for ew in range(3):
+        print(f"\nNS queue: {ns}, EW queue: {ew}:")
+        for light in ['NS', 'EW']:
+            state = (ns, ew, light)
+            action = policy[state]
+            value = V[state]
+            print(f"  Light {light}: {action} (value: {value:.2f})")
+
+# Simulate traffic flow with optimal policy
+print("\n" + "=" * 50)
+print("TRAFFIC SIMULATION WITH OPTIMAL POLICY")
+print("=" * 50)
+
+# Start with some initial state
+current_state = (1, 1, 'NS')  # 1 car in each direction, NS light green
+total_reward = 0
+
+print(f"\nStarting state: {current_state}")
+print("\nSimulating 10 time steps:")
+
+for step in range(10):
+    ns_queue, ew_queue, light = current_state
+    action = policy[current_state]
+    
+    print(f"\nStep {step + 1}:")
+    print(f"  State: NS queue={ns_queue}, EW queue={ew_queue}, Light={light}")
+    print(f"  Action: {action}")
+    
+    # Determine next light
+    if action == 'STAY':
+        next_light = light
+    else:
+        next_light = 'EW' if light == 'NS' else 'NS'
+    
+    # Apply action and get reward
+    reward, new_ns, new_ew = get_reward(ns_queue, ew_queue, next_light)
+    total_reward += reward
+    
+    print(f"  Reward: {reward:.2f}")
+    print(f"  After move: NS queue={new_ns}, EW queue={new_ew}")
+    
+    # Get new arrivals
+    next_ns, next_ew = get_next_queues(new_ns, new_ew)
+    current_state = (next_ns, next_ew, next_light)
+    
+    print(f"  New arrivals: NS queue={next_ns}, EW queue={next_ew}")
+    print(f"  New state: {current_state}")
+
+print(f"\nTotal reward over 10 steps: {total_reward:.2f}")
+
+# Policy insights
+print("\n" + "=" * 50)
+print("KEY INSIGHTS FROM OPTIMAL POLICY")
+print("=" * 50)
+print("\n1. When one direction has more vehicles, switch light to that direction")
+print("2. When queues are equal, keep current light green (avoids switching cost)")
+print("3. Empty queues encourage switching to prevent unnecessary waiting")
+print("4. The system learns to minimize total wait time across both directions")
