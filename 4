@@ -1,0 +1,305 @@
+import numpy as np
+from enum import Enum
+from typing import Tuple, List, Dict
+
+class Action(Enum):
+    UP = 0
+    DOWN = 1
+    LEFT = 2
+    RIGHT = 3
+    STAY = 4  # For delivery points
+
+class GridWorld:
+    def __init__(self, rows: int, cols: int, obstacles: List[Tuple[int, int]], 
+                 delivery_points: List[Tuple[int, int]], warehouse: Tuple[int, int],
+                 gamma: float = 0.9, step_cost: float = -0.1, delivery_reward: float = 10.0):
+        """
+        Initialize the grid world for delivery drone
+        
+        Args:
+            rows, cols: Grid dimensions
+            obstacles: List of (row, col) coordinates that are blocked
+            delivery_points: List of (row, col) coordinates where deliveries happen
+            warehouse: Starting position (row, col)
+            gamma: Discount factor
+            step_cost: Cost for each movement
+            delivery_reward: Reward for reaching delivery point
+        """
+        self.rows = rows
+        self.cols = cols
+        self.obstacles = set(obstacles)
+        self.delivery_points = set(delivery_points)
+        self.warehouse = warehouse
+        self.gamma = gamma
+        self.step_cost = step_cost
+        self.delivery_reward = delivery_reward
+        
+        # Initialize state space (all valid positions)
+        self.states = []
+        for r in range(rows):
+            for c in range(cols):
+                if (r, c) not in self.obstacles:
+                    self.states.append((r, c))
+        
+        self.num_states = len(self.states)
+        
+        # Initialize policy randomly
+        self.policy = np.random.choice(list(Action), size=(rows, cols))
+        
+        # Initialize value function
+        self.values = np.zeros((rows, cols))
+        
+        # For delivery points, optimal policy is to STAY
+        for dp in delivery_points:
+            self.policy[dp] = Action.STAY
+            self.values[dp] = delivery_reward
+
+    def is_valid_state(self, state: Tuple[int, int]) -> bool:
+        """Check if a state is within bounds and not an obstacle"""
+        r, c = state
+        if r < 0 or r >= self.rows or c < 0 or c >= self.cols:
+            return False
+        if (r, c) in self.obstacles:
+            return False
+        return True
+
+    def get_next_state(self, state: Tuple[int, int], action: Action) -> Tuple[int, int]:
+        """Get next state given current state and action"""
+        r, c = state
+        
+        if state in self.delivery_points and action == Action.STAY:
+            return state  # Stay at delivery point
+        
+        if action == Action.UP:
+            next_state = (r-1, c)
+        elif action == Action.DOWN:
+            next_state = (r+1, c)
+        elif action == Action.LEFT:
+            next_state = (r, c-1)
+        elif action == Action.RIGHT:
+            next_state = (r, c+1)
+        elif action == Action.STAY:
+            next_state = (r, c)
+        else:
+            next_state = (r, c)
+        
+        return next_state if self.is_valid_state(next_state) else state
+
+    def get_reward(self, state: Tuple[int, int], next_state: Tuple[int, int]) -> float:
+        """Calculate reward for transition"""
+        if state in self.delivery_points and state == next_state:
+            return self.delivery_reward
+        return self.step_cost
+
+    def policy_evaluation(self, theta: float = 0.001, max_iterations: int = 1000) -> None:
+        """Evaluate the current policy until convergence"""
+        for _ in range(max_iterations):
+            delta = 0
+            new_values = self.values.copy()
+            
+            for state in self.states:
+                if state in self.delivery_points:
+                    continue  # Delivery points have fixed value
+                
+                action = self.policy[state]
+                next_state = self.get_next_state(state, action)
+                reward = self.get_reward(state, next_state)
+                
+                # Bellman equation for policy evaluation
+                new_value = reward + self.gamma * self.values[next_state]
+                new_values[state] = new_value
+                
+                delta = max(delta, abs(new_value - self.values[state]))
+            
+            self.values = new_values
+            
+            if delta < theta:
+                break
+
+    def policy_improvement(self) -> bool:
+        """Improve policy based on current value function"""
+        policy_stable = True
+        
+        for state in self.states:
+            if state in self.delivery_points:
+                continue  # Delivery points keep STAY action
+            
+            old_action = self.policy[state]
+            
+            # Find best action using one-step lookahead
+            best_value = -float('inf')
+            best_action = old_action
+            
+            for action in Action:
+                next_state = self.get_next_state(state, action)
+                reward = self.get_reward(state, next_state)
+                action_value = reward + self.gamma * self.values[next_state]
+                
+                if action_value > best_value:
+                    best_value = action_value
+                    best_action = action
+            
+            # Update policy
+            self.policy[state] = best_action
+            
+            if best_action != old_action:
+                policy_stable = False
+        
+        return policy_stable
+
+    def policy_iteration(self, max_iterations: int = 100) -> Dict:
+        """Perform policy iteration to find optimal policy"""
+        iteration = 0
+        history = {'values': [], 'policies': []}
+        
+        while iteration < max_iterations:
+            iteration += 1
+            
+            # Policy Evaluation
+            self.policy_evaluation()
+            history['values'].append(self.values.copy())
+            
+            # Policy Improvement
+            policy_stable = self.policy_improvement()
+            history['policies'].append(self.policy.copy())
+            
+            if policy_stable:
+                print(f"Policy iteration converged after {iteration} iterations")
+                break
+        
+        return history
+
+    def get_path_from_policy(self, start_state: Tuple[int, int], max_steps: int = 100) -> List[Tuple[int, int]]:
+        """Generate delivery path from start state using optimal policy"""
+        path = [start_state]
+        current_state = start_state
+        steps = 0
+        
+        while steps < max_steps:
+            if current_state in self.delivery_points:
+                break
+            
+            action = self.policy[current_state]
+            next_state = self.get_next_state(current_state, action)
+            
+            if next_state == current_state and action != Action.STAY:
+                break  # Stuck
+            
+            path.append(next_state)
+            current_state = next_state
+            steps += 1
+        
+        return path
+
+    def print_policy_grid(self) -> None:
+        """Print the policy in a readable grid format"""
+        symbols = {
+            Action.UP: '↑',
+            Action.DOWN: '↓',
+            Action.LEFT: '←',
+            Action.RIGHT: '→',
+            Action.STAY: 'D'
+        }
+        
+        print("\nOptimal Policy:")
+        for r in range(self.rows):
+            row_str = ""
+            for c in range(self.cols):
+                if (r, c) in self.obstacles:
+                    row_str += "█ "
+                elif (r, c) in self.delivery_points:
+                    row_str += "D "
+                elif (r, c) == self.warehouse:
+                    row_str += "W "
+                else:
+                    row_str += symbols[self.policy[(r, c)]] + " "
+            print(row_str)
+
+    def print_value_grid(self) -> None:
+        """Print the value function in a readable format"""
+        print("\nValue Function:")
+        for r in range(self.rows):
+            row_str = ""
+            for c in range(self.cols):
+                if (r, c) in self.obstacles:
+                    row_str += "  ██  "
+                elif (r, c) in self.delivery_points:
+                    row_str += f" {self.values[r, c]:5.1f}"
+                else:
+                    row_str += f" {self.values[r, c]:5.1f}"
+            print(row_str)
+
+
+# Example usage
+def main():
+    # Define grid world parameters
+    rows, cols = 6, 8
+    warehouse = (0, 0)
+    
+    # Define obstacles
+    obstacles = [
+        (2, 2), (2, 3), (2, 4),
+        (3, 4), (4, 4), (5, 4)
+    ]
+    
+    # Define delivery points
+    delivery_points = [
+        (5, 7),  # Far delivery
+        (0, 5),  # Middle delivery
+        (3, 0)   # Near delivery
+    ]
+    
+    # Create grid world
+    print("Initializing Delivery Drone Grid World...")
+    print(f"Grid size: {rows}x{cols}")
+    print(f"Warehouse at: {warehouse}")
+    print(f"Delivery points: {delivery_points}")
+    print(f"Obstacles: {obstacles}")
+    
+    grid_world = GridWorld(
+        rows=rows,
+        cols=cols,
+        obstacles=obstacles,
+        delivery_points=delivery_points,
+        warehouse=warehouse,
+        gamma=0.95,
+        step_cost=-0.1,
+        delivery_reward=10.0
+    )
+    
+    # Perform policy iteration
+    print("\nPerforming policy iteration...")
+    history = grid_world.policy_iteration(max_iterations=50)
+    
+    # Print results
+    grid_world.print_policy_grid()
+    grid_world.print_value_grid()
+    
+    # Generate and display delivery paths
+    print("\nDelivery Paths from Warehouse:")
+    for i, delivery_point in enumerate(delivery_points):
+        print(f"\nPath to Delivery Point {i+1} at {delivery_point}:")
+        path = grid_world.get_path_from_policy(warehouse)
+        print(f"  Path: {path}")
+        print(f"  Steps: {len(path)-1}")
+    
+    # Interactive test
+    print("\nInteractive Test - Enter coordinates to see optimal action:")
+    while True:
+        try:
+            inp = input("Enter row col (or 'q' to quit): ")
+            if inp.lower() == 'q':
+                break
+            
+            r, c = map(int, inp.split())
+            if 0 <= r < rows and 0 <= c < cols and (r, c) not in obstacles:
+                action = grid_world.policy[(r, c)]
+                value = grid_world.values[(r, c)]
+                print(f"  State ({r},{c}): Action={action.name}, Value={value:.3f}")
+            else:
+                print("  Invalid coordinates!")
+        except:
+            print("  Invalid input! Use format: 'row col'")
+
+if __name__ == "__main__":
+    main()
