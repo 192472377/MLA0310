@@ -1,0 +1,339 @@
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+
+class CityGridEnv:
+    """Simple city grid environment for drone delivery"""
+    
+    def __init__(self, size=5, delivery_locations=None):
+        """
+        Initialize the city grid environment
+        
+        Args:
+            size: Grid size (size x size)
+            delivery_locations: List of delivery locations [(x1, y1), (x2, y2), ...]
+        """
+        self.size = size
+        self.start_pos = (0, 0)  # Drone starts at top-left corner
+        self.drone_pos = self.start_pos
+        
+        # Define delivery locations if not provided
+        if delivery_locations is None:
+            self.delivery_locations = [(size-1, size-1), (size-1, 0), (0, size-1)]
+        else:
+            self.delivery_locations = delivery_locations
+            
+        # Track which deliveries are completed
+        self.deliveries_completed = [False] * len(self.delivery_locations)
+        
+        # Action space: 0=up, 1=right, 2=down, 3=left, 4=deliver (if at delivery point)
+        self.actions = ['up', 'right', 'down', 'left', 'deliver']
+        self.n_actions = len(self.actions)
+        
+    def reset(self):
+        """Reset the environment to initial state"""
+        self.drone_pos = self.start_pos
+        self.deliveries_completed = [False] * len(self.delivery_locations)
+        state = self._get_state()
+        return state
+    
+    def _get_state(self):
+        """Convert current position and delivery status to state representation"""
+        # State is (x, y, delivery1_complete, delivery2_complete, ...)
+        state = list(self.drone_pos) + self.deliveries_completed
+        return tuple(state)
+    
+    def step(self, action):
+        """
+        Take an action in the environment
+        
+        Returns:
+            next_state, reward, done, info
+        """
+        x, y = self.drone_pos
+        reward = -1  # Default: -1 for each step (encourages efficiency)
+        done = False
+        
+        if action == 0:  # Up
+            y = max(0, y - 1)
+        elif action == 1:  # Right
+            x = min(self.size - 1, x + 1)
+        elif action == 2:  # Down
+            y = min(self.size - 1, y + 1)
+        elif action == 3:  # Left
+            x = max(0, x - 1)
+        elif action == 4:  # Deliver
+            # Check if drone is at a delivery location with package not delivered
+            for i, loc in enumerate(self.delivery_locations):
+                if (x, y) == loc and not self.deliveries_completed[i]:
+                    self.deliveries_completed[i] = True
+                    reward = 20  # Big reward for successful delivery
+                    break
+        
+        # Update drone position
+        self.drone_pos = (x, y)
+        
+        # Small penalty for fuel consumption based on distance from start
+        fuel_penalty = -0.1 * (abs(x) + abs(y))
+        reward += fuel_penalty
+        
+        # Check if all deliveries are complete
+        if all(self.deliveries_completed):
+            done = True
+            reward += 50  # Bonus for completing all deliveries
+            
+        next_state = self._get_state()
+        info = {'position': (x, y), 'deliveries': self.deliveries_completed.copy()}
+        
+        return next_state, reward, done, info
+    
+    def get_valid_actions(self):
+        """Get list of valid actions from current state"""
+        valid_actions = list(range(self.n_actions))
+        
+        # Check if deliver action is valid
+        x, y = self.drone_pos
+        deliver_valid = False
+        for i, loc in enumerate(self.delivery_locations):
+            if (x, y) == loc and not self.deliveries_completed[i]:
+                deliver_valid = True
+                break
+        
+        if not deliver_valid:
+            valid_actions.remove(4)  # Remove deliver action if not valid
+            
+        return valid_actions
+
+class MonteCarloControl:
+    """Monte Carlo Control for learning optimal policy"""
+    
+    def __init__(self, env, gamma=0.9, epsilon=0.1):
+        """
+        Initialize Monte Carlo Control
+        
+        Args:
+            env: Environment object
+            gamma: Discount factor
+            epsilon: Exploration rate for epsilon-greedy policy
+        """
+        self.env = env
+        self.gamma = gamma
+        self.epsilon = epsilon
+        
+        # Initialize Q-table (state-action value function)
+        self.Q = {}
+        self.returns = {}  # For tracking returns for each state-action pair
+        
+        # Initialize policy (initially random)
+        self.policy = {}
+    
+    def get_action(self, state):
+        """Epsilon-greedy policy"""
+        if state not in self.Q:
+            # Initialize Q-values for this state if not seen before
+            self.Q[state] = np.zeros(self.env.n_actions)
+            return random.choice(self.env.get_valid_actions())
+        
+        if random.random() < self.epsilon:
+            # Explore: choose random valid action
+            return random.choice(self.env.get_valid_actions())
+        else:
+            # Exploit: choose best action based on Q-values
+            # Consider only valid actions
+            valid_actions = self.env.get_valid_actions()
+            q_values = [self.Q[state][a] for a in valid_actions]
+            best_action_idx = np.argmax(q_values)
+            return valid_actions[best_action_idx]
+    
+    def generate_episode(self):
+        """Generate one episode using current policy"""
+        state = self.env.reset()
+        episode = []
+        
+        done = False
+        max_steps = 100
+        
+        for step in range(max_steps):
+            action = self.get_action(state)
+            next_state, reward, done, info = self.env.step(action)
+            
+            episode.append((state, action, reward))
+            state = next_state
+            
+            if done:
+                break
+        
+        return episode
+    
+    def update_policy(self, episode):
+        """Update Q-values and policy based on episode"""
+        # Calculate returns
+        G = 0
+        states_actions_visited = []
+        
+        # Process episode in reverse
+        for t in range(len(episode) - 1, -1, -1):
+            state, action, reward = episode[t]
+            G = self.gamma * G + reward
+            
+            # Check if state-action pair was visited earlier in episode
+            if (state, action) not in [(s, a) for (s, a, _) in episode[:t]]:
+                if (state, action) not in self.returns:
+                    self.returns[(state, action)] = []
+                self.returns[(state, action)].append(G)
+                
+                # Update Q-value as average of returns
+                self.Q[state][action] = np.mean(self.returns[(state, action)])
+                
+                # Update policy for this state
+                if state not in self.policy:
+                    self.policy[state] = np.zeros(self.env.n_actions)
+                
+                # Choose best action for this state
+                valid_actions = list(range(self.env.n_actions))
+                q_values = [self.Q[state][a] if state in self.Q else 0 for a in valid_actions]
+                best_action = np.argmax(q_values)
+                
+                # Set policy to deterministic best action
+                self.policy[state] = np.eye(self.env.n_actions)[best_action]
+    
+    def train(self, num_episodes=1000):
+        """Train the agent using Monte Carlo Control"""
+        rewards_history = []
+        
+        for episode_num in range(num_episodes):
+            # Generate episode
+            episode = self.generate_episode()
+            
+            # Calculate total reward for this episode
+            total_reward = sum([r for (_, _, r) in episode])
+            rewards_history.append(total_reward)
+            
+            # Update policy
+            self.update_policy(episode)
+            
+            # Decay epsilon for less exploration over time
+            self.epsilon = max(0.01, self.epsilon * 0.995)
+            
+            # Print progress
+            if (episode_num + 1) % 100 == 0:
+                avg_reward = np.mean(rewards_history[-100:])
+                print(f"Episode {episode_num + 1}/{num_episodes}, "
+                      f"Average Reward (last 100): {avg_reward:.2f}, "
+                      f"Epsilon: {self.epsilon:.3f}")
+        
+        return rewards_history
+    
+    def test_policy(self, num_tests=5):
+        """Test the learned policy"""
+        print("\n" + "="*50)
+        print("Testing Learned Policy")
+        print("="*50)
+        
+        for test_num in range(num_tests):
+            state = self.env.reset()
+            done = False
+            total_reward = 0
+            steps = 0
+            
+            print(f"\nTest {test_num + 1}:")
+            print(f"Starting at {self.env.drone_pos}")
+            
+            while not done and steps < 50:
+                # Get action from policy
+                if state in self.policy:
+                    action = np.argmax(self.policy[state])
+                else:
+                    action = random.choice(self.env.get_valid_actions())
+                
+                # Take action
+                next_state, reward, done, info = self.env.step(action)
+                
+                # Print step info
+                action_name = self.env.actions[action]
+                print(f"  Step {steps}: At {info['position']}, Action: {action_name}, "
+                      f"Reward: {reward:.2f}")
+                
+                total_reward += reward
+                state = next_state
+                steps += 1
+            
+            print(f"Total reward: {total_reward:.2f}, Steps: {steps}")
+            print(f"Deliveries completed: {info['deliveries']}")
+
+def visualize_learning(rewards_history):
+    """Visualize the learning progress"""
+    plt.figure(figsize=(12, 4))
+    
+    # Plot rewards
+    plt.subplot(1, 2, 1)
+    plt.plot(rewards_history, alpha=0.6)
+    plt.title('Reward per Episode')
+    plt.xlabel('Episode')
+    plt.ylabel('Total Reward')
+    
+    # Plot moving average
+    window = 50
+    moving_avg = np.convolve(rewards_history, np.ones(window)/window, mode='valid')
+    plt.plot(range(window-1, len(rewards_history)), moving_avg, 'r-', linewidth=2, label=f'{window}-episode moving average')
+    plt.legend()
+    
+    # Plot histogram of rewards
+    plt.subplot(1, 2, 2)
+    plt.hist(rewards_history, bins=30, alpha=0.7, edgecolor='black')
+    plt.title('Distribution of Rewards')
+    plt.xlabel('Total Reward')
+    plt.ylabel('Frequency')
+    
+    plt.tight_layout()
+    plt.show()
+
+def main():
+    """Main function to run the simulation"""
+    print("="*50)
+    print("Autonomous Drone Delivery using Monte Carlo Control")
+    print("="*50)
+    
+    # Create environment
+    print("\nCreating 5x5 city grid with delivery locations...")
+    env = CityGridEnv(size=5)
+    print(f"Delivery locations: {env.delivery_locations}")
+    
+    # Create Monte Carlo Control agent
+    print("\nInitializing Monte Carlo Control agent...")
+    agent = MonteCarloControl(env, gamma=0.95, epsilon=0.3)
+    
+    # Train the agent
+    print("\nTraining agent...")
+    rewards_history = agent.train(num_episodes=2000)
+    
+    # Test the learned policy
+    agent.test_policy(num_tests=3)
+    
+    # Visualize learning
+    visualize_learning(rewards_history)
+    
+    # Show example of learned policy for some states
+    print("\n" + "="*50)
+    print("Example Learned Policy:")
+    print("="*50)
+    
+    # Check some example states
+    example_states = [
+        (0, 0, False, False, False),  # Start position, no deliveries
+        (4, 4, False, False, False),  # At delivery point 1
+        (4, 4, True, False, False),   # After delivering at point 1
+    ]
+    
+    for i, state in enumerate(example_states):
+        if state in agent.policy:
+            action_probs = agent.policy[state]
+            best_action = np.argmax(action_probs)
+            print(f"\nState {state}:")
+            print(f"  Best action: {env.actions[best_action]}")
+            print(f"  Q-values: {agent.Q[state]}")
+        else:
+            print(f"\nState {state}: Not visited during training")
+
+if __name__ == "__main__":
+    main()
