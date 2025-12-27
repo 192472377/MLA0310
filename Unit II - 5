@@ -1,0 +1,564 @@
+import numpy as np
+import random
+import time
+import sys
+from collections import defaultdict
+
+class PacManGame:
+    """Simple grid-based Pac-Man game environment"""
+    def __init__(self, width=8, height=8):
+        self.width = width
+        self.height = height
+        self.reset()
+        
+        # Game elements codes: 0=empty, 1=food, 2=power pellet, 3=ghost, 4=wall, 5=player
+        self.grid = np.zeros((height, width), dtype=int)
+        
+        # Create walls (borders)
+        self.grid[0, :] = 4
+        self.grid[-1, :] = 4
+        self.grid[:, 0] = 4
+        self.grid[:, -1] = 4
+        
+        # Add some internal walls
+        internal_walls = [
+            (2, 2), (2, 3), (2, 4),
+            (5, 1), (5, 2), (5, 3),
+            (3, 5), (4, 5), (5, 5)
+        ]
+        for wall in internal_walls:
+            if 0 <= wall[0] < height and 0 <= wall[1] < width:
+                self.grid[wall] = 4
+        
+        # Add food (small dots) to most empty spaces
+        for row in range(1, height-1):
+            for col in range(1, width-1):
+                if self.grid[row, col] == 0:
+                    self.grid[row, col] = 1
+        
+        # Add power pellets (big dots)
+        power_positions = [(1, 1), (1, width-2), (height-2, 1), (height-2, width-2)]
+        for pos in power_positions:
+            if self.grid[pos] == 1:
+                self.grid[pos] = 2
+        
+        # Add ghosts
+        self.ghost_positions = [(3, 3), (4, 6)]
+        for pos in self.ghost_positions:
+            self.grid[pos] = 3
+            
+        # Starting position for Pac-Man
+        self.start_pos = (height//2, width//2)
+        self.grid[self.start_pos] = 5
+        
+        # Game state
+        self.score = 0
+        self.lives = 3
+        self.steps = 0
+        self.power_mode = False
+        self.power_timer = 0
+        
+    def reset(self):
+        """Reset the game to initial state"""
+        self.player_pos = (self.height//2, self.width//2) if hasattr(self, 'height') else (4, 4)
+        self.score = 0
+        self.lives = 3
+        self.steps = 0
+        self.power_mode = False
+        self.power_timer = 0
+        self.game_over = False
+        
+        # Create a fresh grid
+        self.__init__(self.width, self.height)  # Reinitialize
+        return self.get_state()
+    
+    def get_state(self):
+        """Get current state representation for Q-learning"""
+        row, col = self.player_pos
+        
+        # Simplified state: position + nearby information
+        nearby_food = self.count_nearby(row, col, 1)  # Food within 1 cell
+        nearby_ghosts = self.count_nearby(row, col, 2)  # Ghosts within 2 cells
+        has_power = 1 if self.power_mode else 0
+        
+        # Return a tuple that can be used as dictionary key
+        state_key = (row, col, nearby_food, nearby_ghosts, has_power)
+        return state_key
+    
+    def count_nearby(self, row, col, distance):
+        """Count specific elements nearby"""
+        count = 0
+        for dr in range(-distance, distance + 1):
+            for dc in range(-distance, distance + 1):
+                if dr == 0 and dc == 0:
+                    continue
+                r, c = row + dr, col + dc
+                if 0 <= r < self.height and 0 <= c < self.width:
+                    if distance == 1 and self.grid[r, c] in [1, 2]:  # Food nearby
+                        count += 1
+                    elif distance == 2 and self.grid[r, c] == 3:  # Ghosts nearby
+                        count += 1
+        return min(count, 3)  # Cap at 3 for state simplification
+    
+    def move_ghosts(self):
+        """Move ghosts randomly"""
+        new_ghost_positions = []
+        for ghost_pos in self.ghost_positions:
+            gr, gc = ghost_pos
+            
+            # Remove ghost from current position if it's not overlapping with other game element
+            if self.grid[gr, gc] == 3:
+                self.grid[gr, gc] = 0
+            
+            # Try random moves until we find a valid one
+            possible_moves = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+            random.shuffle(possible_moves)
+            
+            moved = False
+            for dr, dc in possible_moves:
+                new_gr, new_gc = gr + dr, gc + dc
+                if (0 <= new_gr < self.height and 0 <= new_gc < self.width and 
+                    self.grid[new_gr, new_gc] not in [3, 4]):  # Not another ghost or wall
+                    ghost_pos = (new_gr, new_gc)
+                    moved = True
+                    break
+            
+            if not moved:
+                ghost_pos = (gr, gc)  # Stay in place
+            
+            new_ghost_positions.append(ghost_pos)
+            self.grid[ghost_pos] = 3
+        
+        self.ghost_positions = new_ghost_positions
+    
+    def step(self, action):
+        """
+        Take an action in the environment
+        Actions: 0=up, 1=right, 2=down, 3=left
+        """
+        if self.game_over:
+            return self.get_state(), 0, True
+        
+        row, col = self.player_pos
+        self.steps += 1
+        
+        # Move based on action
+        if action == 0:  # Up
+            new_row, new_col = row - 1, col
+        elif action == 1:  # Right
+            new_row, new_col = row, col + 1
+        elif action == 2:  # Down
+            new_row, new_col = row + 1, col
+        elif action == 3:  # Left
+            new_row, new_col = row, col - 1
+        else:
+            new_row, new_col = row, col  # Invalid action
+        
+        reward = 0
+        done = False
+        
+        # Check if move is valid (not a wall)
+        if self.grid[new_row, new_col] != 4:
+            # Update player position on grid
+            if self.grid[row, col] == 5:  # Only remove if it's still player
+                self.grid[row, col] = 0
+            self.player_pos = (new_row, new_col)
+            
+            # Check what's at new position
+            cell_value = self.grid[new_row, new_col]
+            
+            if cell_value == 1:  # Food
+                reward = 10
+                self.score += 10
+                self.grid[new_row, new_col] = 5
+                
+            elif cell_value == 2:  # Power pellet
+                reward = 30
+                self.score += 30
+                self.power_mode = True
+                self.power_timer = 10  # Power lasts for 10 steps
+                self.grid[new_row, new_col] = 5
+                
+            elif cell_value == 3:  # Ghost
+                if self.power_mode:
+                    reward = 50  # Eating ghost
+                    self.score += 50
+                    # Ghost respawns at random location
+                    empty_cells = []
+                    for r in range(1, self.height-1):
+                        for c in range(1, self.width-1):
+                            if self.grid[r, c] == 0:
+                                empty_cells.append((r, c))
+                    if empty_cells:
+                        respawn_pos = random.choice(empty_cells)
+                        self.grid[respawn_pos] = 3
+                        self.ghost_positions = [p for p in self.ghost_positions if p != (new_row, new_col)]
+                        self.ghost_positions.append(respawn_pos)
+                    self.grid[new_row, new_col] = 5
+                else:
+                    reward = -100  # Caught by ghost
+                    self.lives -= 1
+                    if self.lives <= 0:
+                        done = True
+                        self.game_over = True
+                    else:
+                        # Respawn player at start
+                        self.grid[new_row, new_col] = 0
+                        self.player_pos = self.start_pos
+                        self.grid[self.start_pos] = 5
+                        
+            elif cell_value == 0:  # Empty space
+                reward = -0.5  # Small penalty for moving without collecting
+                self.grid[new_row, new_col] = 5
+                
+            else:  # Player already there (shouldn't happen)
+                self.grid[new_row, new_col] = 5
+        else:
+            # Hit a wall - penalty and don't move
+            reward = -5
+            self.grid[row, col] = 5
+        
+        # Move ghosts
+        self.move_ghosts()
+        
+        # Check if player collided with ghost after ghost move
+        if self.player_pos in self.ghost_positions and not self.power_mode:
+            reward = -100
+            self.lives -= 1
+            if self.lives <= 0:
+                done = True
+                self.game_over = True
+            else:
+                # Respawn player
+                self.grid[self.player_pos] = 0
+                self.player_pos = self.start_pos
+                self.grid[self.start_pos] = 5
+        
+        # Update power mode timer
+        if self.power_mode:
+            self.power_timer -= 1
+            if self.power_timer <= 0:
+                self.power_mode = False
+        
+        # Check win condition (all food eaten)
+        food_remaining = np.sum(self.grid == 1) + np.sum(self.grid == 2)
+        if food_remaining == 0:
+            reward = 100  # Big reward for winning
+            done = True
+            
+        # Small reward for staying alive
+        reward += 0.1
+        
+        return self.get_state(), reward, done
+    
+    def render(self):
+        """Display the current game state"""
+        print(f"\nStep: {self.steps} | Score: {self.score} | Lives: {self.lives} | Power Mode: {'ON' if self.power_mode else 'OFF'}")
+        print("=" * (self.width * 2 + 3))
+        
+        symbols = {
+            0: ' ',  # Empty
+            1: '.',  # Food
+            2: '●',  # Power pellet
+            3: '👻',  # Ghost
+            4: '█',   # Wall
+            5: '😊'    # Pac-Man
+        }
+        
+        for row in range(self.height):
+            print("|", end="")
+            for col in range(self.width):
+                print(symbols[self.grid[row, col]], end=" ")
+            print("|")
+        print("=" * (self.width * 2 + 3))
+
+
+class QLearningAgent:
+    """Q-learning agent for Pac-Man"""
+    def __init__(self, env, learning_rate=0.1, discount_factor=0.9, 
+                 epsilon=0.2, epsilon_decay=0.995, min_epsilon=0.05):
+        self.env = env
+        self.learning_rate = learning_rate
+        self.discount_factor = discount_factor
+        self.epsilon = epsilon  # Exploration rate
+        self.epsilon_decay = epsilon_decay
+        self.min_epsilon = min_epsilon
+        
+        # Initialize Q-table as dictionary
+        self.q_table = defaultdict(lambda: np.zeros(4))  # 4 actions
+        
+    def choose_action(self, state, training=True):
+        """Epsilon-greedy action selection"""
+        if training and random.random() < self.epsilon:
+            # Explore: choose random action
+            return random.randint(0, 3)
+        else:
+            # Exploit: choose best action from Q-table
+            return np.argmax(self.q_table[state])
+    
+    def update_q_value(self, state, action, reward, next_state):
+        """Update Q-value using Q-learning formula"""
+        # Get current Q-value
+        current_q = self.q_table[state][action]
+        
+        # Get max Q-value for next state
+        max_next_q = np.max(self.q_table[next_state])
+        
+        # Q-learning update formula:
+        # Q(s,a) = Q(s,a) + α * [r + γ * max(Q(s',a')) - Q(s,a)]
+        td_target = reward + self.discount_factor * max_next_q
+        td_error = td_target - current_q
+        
+        # Update Q-value
+        self.q_table[state][action] += self.learning_rate * td_error
+        
+        return td_error
+    
+    def decay_epsilon(self):
+        """Gradually reduce exploration rate"""
+        self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+    
+    def train(self, episodes=500, max_steps=200, render_freq=50):
+        """Train the agent using Q-learning"""
+        print("Training Pac-Man with Q-learning...")
+        
+        episode_scores = []
+        episode_lengths = []
+        
+        for episode in range(episodes):
+            state = self.env.reset()
+            total_reward = 0
+            steps = 0
+            done = False
+            
+            while not done and steps < max_steps:
+                # Choose action
+                action = self.choose_action(state)
+                
+                # Take action
+                next_state, reward, done = self.env.step(action)
+                
+                # Update Q-value
+                self.update_q_value(state, action, reward, next_state)
+                
+                # Move to next state
+                state = next_state
+                total_reward += reward
+                steps += 1
+            
+            # Decay epsilon after each episode
+            self.decay_epsilon()
+            
+            # Record metrics
+            episode_scores.append(self.env.score)
+            episode_lengths.append(steps)
+            
+            # Print progress
+            if (episode + 1) % render_freq == 0:
+                avg_score = np.mean(episode_scores[-render_freq:])
+                avg_length = np.mean(episode_lengths[-render_freq:])
+                print(f"Episode {episode + 1}/{episodes}, "
+                      f"Avg Score: {avg_score:.1f}, "
+                      f"Avg Steps: {avg_length:.1f}, "
+                      f"Epsilon: {self.epsilon:.3f}")
+        
+        return episode_scores, episode_lengths
+    
+    def play(self, episodes=3, render=True):
+        """Let the trained agent play the game"""
+        print("\n" + "="*50)
+        print("Trained Pac-Man in Action!")
+        print("="*50)
+        
+        for episode in range(episodes):
+            state = self.env.reset()
+            total_reward = 0
+            steps = 0
+            done = False
+            
+            if render:
+                print(f"\nEpisode {episode + 1}:")
+                self.env.render()
+                time.sleep(0.5)
+            
+            while not done and steps < 100:
+                # Choose action (greedy - no exploration)
+                action = self.choose_action(state, training=False)
+                
+                # Take action
+                state, reward, done = self.env.step(action)
+                total_reward += reward
+                steps += 1
+                
+                if render and steps % 5 == 0:
+                    self.env.render()
+                    time.sleep(0.1)
+            
+            print(f"Episode {episode + 1} - Score: {self.env.score}, Steps: {steps}, "
+                  f"Total Reward: {total_reward:.1f}")
+            if render:
+                time.sleep(1)
+
+
+def plot_training_results(scores, lengths):
+    """Plot training results"""
+    try:
+        import matplotlib.pyplot as plt
+        
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+        
+        # Plot scores
+        ax1.plot(scores, alpha=0.6, linewidth=0.8)
+        ax1.set_title('Pac-Man Training: Scores per Episode')
+        ax1.set_xlabel('Episode')
+        ax1.set_ylabel('Score')
+        ax1.grid(True, alpha=0.3)
+        
+        # Add moving average
+        window = 20
+        if len(scores) > window:
+            moving_avg = np.convolve(scores, np.ones(window)/window, mode='valid')
+            ax1.plot(range(window-1, len(scores)), moving_avg, 'r-', linewidth=2, 
+                    label=f'Moving Avg ({window} eps)')
+            ax1.legend()
+        
+        # Plot episode lengths
+        ax2.plot(lengths, alpha=0.6, linewidth=0.8, color='green')
+        ax2.set_title('Episode Lengths (Steps)')
+        ax2.set_xlabel('Episode')
+        ax2.set_ylabel('Steps')
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        
+    except ImportError:
+        print("\nMatplotlib not installed. Skipping plots.")
+        print("You can install it with: pip install matplotlib")
+
+
+def print_learned_policy(agent):
+    """Print some insights about what the agent learned"""
+    print("\n" + "="*50)
+    print("What Pac-Man Learned:")
+    print("="*50)
+    
+    # Check Q-values for some example states
+    action_names = ['↑', '→', '↓', '←']
+    
+    # State: middle of board, food nearby, ghost nearby
+    test_state = (4, 4, 2, 1, 0)  # Position (4,4), 2 food nearby, 1 ghost nearby, no power
+    
+    if test_state in agent.q_table:
+        q_values = agent.q_table[test_state]
+        best_action = np.argmax(q_values)
+        
+        print(f"\nState: Position({test_state[0]},{test_state[1]}), "
+              f"{test_state[2]} food nearby, {test_state[3]} ghosts nearby")
+        print(f"Best action: {action_names[best_action]}")
+        print(f"Q-values: {[f'{q:.2f}' for q in q_values]}")
+    
+    # State: near ghost with power mode
+    test_state2 = (4, 4, 1, 2, 1)  # Position (4,4), 1 food, 2 ghosts, power mode
+    
+    if test_state2 in agent.q_table:
+        q_values = agent.q_table[test_state2]
+        best_action = np.argmax(q_values)
+        
+        print(f"\nState: Position({test_state2[0]},{test_state2[1]}), "
+              f"{test_state2[2]} food nearby, {test_state2[3]} ghosts nearby, POWER MODE")
+        print(f"Best action: {action_names[best_action]}")
+        print(f"Q-values: {[f'{q:.2f}' for q in q_values]}")
+
+
+def main():
+    """Main function to run Q-learning for Pac-Man"""
+    print("="*60)
+    print("PAC-MAN Q-LEARNING AGENT")
+    print("="*60)
+    print("\nGame Elements:")
+    print("😊 = Pac-Man")
+    print("👻 = Ghost (avoid when not in power mode)")
+    print(". = Food (10 points)")
+    print("● = Power Pellet (30 points, allows eating ghosts)")
+    print("█ = Wall (cannot pass through)")
+    
+    # Create game environment
+    env = PacManGame(width=8, height=8)
+    
+    # Create Q-learning agent
+    agent = QLearningAgent(
+        env=env,
+        learning_rate=0.1,
+        discount_factor=0.9,
+        epsilon=0.3,
+        epsilon_decay=0.998,
+        min_epsilon=0.05
+    )
+    
+    # Show initial game state
+    print("\nInitial Game Board:")
+    env.render()
+    
+    # Train the agent
+    print("\n" + "="*60)
+    print("STARTING TRAINING")
+    print("="*60)
+    
+    input("\nPress Enter to start training...")
+    
+    scores, lengths = agent.train(episodes=300, max_steps=200, render_freq=50)
+    
+    # Show what the agent learned
+    print_learned_policy(agent)
+    
+    # Plot training results
+    plot_training_results(scores, lengths)
+    
+    # Let the trained agent play
+    print("\n" + "="*60)
+    print("WATCHING TRAINED PAC-MAN PLAY")
+    print("="*60)
+    
+    agent.play(episodes=3, render=True)
+    
+    # Test performance
+    print("\n" + "="*60)
+    print("PERFORMANCE TEST (10 episodes, no rendering)")
+    print("="*60)
+    
+    test_scores = []
+    for _ in range(10):
+        state = env.reset()
+        done = False
+        steps = 0
+        
+        while not done and steps < 200:
+            action = agent.choose_action(state, training=False)
+            state, reward, done = env.step(action)
+            steps += 1
+        
+        test_scores.append(env.score)
+    
+    print(f"\nTest Results (10 episodes):")
+    print(f"  Average Score: {np.mean(test_scores):.1f}")
+    print(f"  Best Score: {max(test_scores)}")
+    print(f"  Worst Score: {min(test_scores)}")
+    print(f"  Standard Deviation: {np.std(test_scores):.1f}")
+    
+    # Final demonstration
+    print("\n" + "="*60)
+    print("FINAL DEMONSTRATION")
+    print("="*60)
+    
+    input("\nPress Enter for final demonstration...")
+    env.reset()
+    agent.play(episodes=1, render=True)
+    
+    print("\n" + "="*60)
+    print("Q-LEARNING FOR PAC-MAN COMPLETED!")
+    print("="*60)
+
+
+if __name__ == "__main__":
+    main()
