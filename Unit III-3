@@ -1,0 +1,714 @@
+"""
+Warehouse Robot with PPO (Proximal Policy Optimization)
+A beginner-friendly implementation
+"""
+
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+import seaborn as sns
+from collections import deque
+import time
+
+# Set random seeds for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+# ============================================================================
+# 1. WAREHOUSE ENVIRONMENT (The Robot's World)
+# ============================================================================
+
+class WarehouseEnv:
+    """
+    A simple warehouse where a robot picks items and delivers them.
+    Think of this as the robot's playground with rules.
+    """
+    
+    def __init__(self, grid_size=10):
+        # Warehouse layout
+        self.grid_size = grid_size
+        
+        # Positions in the warehouse
+        self.robot_pos = [1, 1]  # Starting position
+        self.packing_station = [8, 8]  # Where to deliver items
+        self.shelves = self._create_shelves()  # Where items are stored
+        
+        # Robot status
+        self.carrying_item = False
+        self.items_picked = 0
+        self.steps_taken = 0
+        self.episode_reward = 0
+        
+        # Warehouse obstacles
+        self.obstacles = self._create_obstacles()
+        
+        # Action meanings (what the robot can do)
+        self.action_meanings = {
+            0: "Move Up",
+            1: "Move Down", 
+            2: "Move Left",
+            3: "Move Right",
+            4: "Pick Item",
+            5: "Drop Item"
+        }
+        
+        # For visualization
+        self.robot_path = [tuple(self.robot_pos.copy())]
+        
+    def _create_shelves(self):
+        """Create shelf locations in the warehouse"""
+        shelves = []
+        # Create some shelves at fixed positions
+        for i in range(2, 8):
+            for j in [3, 6]:
+                shelves.append([i, j])
+        return shelves
+    
+    def _create_obstacles(self):
+        """Create obstacles (walls, other robots, etc.)"""
+        obstacles = []
+        # Create a wall in the middle
+        for i in range(3, 7):
+            obstacles.append([i, 5])
+        # Some random obstacles
+        obstacles.append([2, 2])
+        obstacles.append([7, 3])
+        obstacles.append([5, 7])
+        return obstacles
+    
+    def reset(self):
+        """Reset the warehouse to start a new episode"""
+        self.robot_pos = [1, 1]
+        self.carrying_item = False
+        self.items_picked = 0
+        self.steps_taken = 0
+        self.episode_reward = 0
+        self.robot_path = [tuple(self.robot_pos.copy())]
+        
+        # Return the initial state (robot's view of the world)
+        return self._get_state()
+    
+    def _get_state(self):
+        """
+        Create a simple state representation that the robot can understand.
+        This is like the robot's "sensors".
+        """
+        state = []
+        
+        # 1. Robot's position (normalized)
+        state.append(self.robot_pos[0] / self.grid_size)
+        state.append(self.robot_pos[1] / self.grid_size)
+        
+        # 2. Is robot carrying an item? (0 or 1)
+        state.append(1.0 if self.carrying_item else 0.0)
+        
+        # 3. Distance to nearest shelf (if not carrying item)
+        if not self.carrying_item:
+            min_dist = float('inf')
+            for shelf in self.shelves:
+                dist = abs(shelf[0] - self.robot_pos[0]) + abs(shelf[1] - self.robot_pos[1])
+                min_dist = min(min_dist, dist)
+            state.append(min_dist / self.grid_size)
+        else:
+            # Distance to packing station if carrying item
+            dist = abs(self.packing_station[0] - self.robot_pos[0]) + \
+                   abs(self.packing_station[1] - self.robot_pos[1])
+            state.append(dist / self.grid_size)
+        
+        # 4. Is robot at a shelf? (0 or 1)
+        at_shelf = any(self.robot_pos == shelf for shelf in self.shelves)
+        state.append(1.0 if at_shelf else 0.0)
+        
+        # 5. Is robot at packing station? (0 or 1)
+        at_station = (self.robot_pos[0] == self.packing_station[0] and 
+                     self.robot_pos[1] == self.packing_station[1])
+        state.append(1.0 if at_station else 0.0)
+        
+        return np.array(state, dtype=np.float32)
+    
+    def step(self, action):
+        """
+        The robot takes an action, and we see what happens.
+        Returns: new_state, reward, done (episode finished?), info
+        """
+        reward = 0
+        done = False
+        info = {}
+        
+        # Move actions (0-3)
+        if action < 4:
+            new_pos = self.robot_pos.copy()
+            
+            if action == 0:  # Up
+                new_pos[0] -= 1
+            elif action == 1:  # Down
+                new_pos[0] += 1
+            elif action == 2:  # Left
+                new_pos[1] -= 1
+            elif action == 3:  # Right
+                new_pos[1] += 1
+            
+            # Check if new position is valid
+            if self._is_valid_position(new_pos):
+                self.robot_pos = new_pos
+                self.robot_path.append(tuple(self.robot_pos.copy()))
+                # Small penalty for moving (encourages efficiency)
+                reward -= 0.1
+            else:
+                # Penalty for hitting wall/obstacle
+                reward -= 0.5
+        
+        # Pick item action (4)
+        elif action == 4:
+            at_shelf = any(self.robot_pos == shelf for shelf in self.shelves)
+            if at_shelf and not self.carrying_item:
+                self.carrying_item = True
+                reward += 5  # Good job picking item!
+                info['action'] = 'picked_item'
+            else:
+                reward -= 1  # Can't pick here
+        
+        # Drop item action (5)
+        elif action == 5:
+            at_station = (self.robot_pos[0] == self.packing_station[0] and 
+                         self.robot_pos[1] == self.packing_station[1])
+            if at_station and self.carrying_item:
+                self.carrying_item = False
+                self.items_picked += 1
+                reward += 10  # Excellent! Delivered item!
+                info['action'] = 'delivered_item'
+                
+                # Episode ends after 3 deliveries
+                if self.items_picked >= 3:
+                    done = True
+                    reward += 20  # Bonus for completing task
+            else:
+                reward -= 1  # Can't drop here
+        
+        self.steps_taken += 1
+        self.episode_reward += reward
+        
+        # Episode ends if too many steps
+        if self.steps_taken >= 200:
+            done = True
+            if self.items_picked == 0:
+                reward -= 5  # Penalty for not delivering anything
+        
+        return self._get_state(), reward, done, info
+    
+    def _is_valid_position(self, pos):
+        """Check if position is within warehouse and not on obstacle"""
+        # Check boundaries
+        if pos[0] < 0 or pos[0] >= self.grid_size:
+            return False
+        if pos[1] < 0 or pos[1] >= self.grid_size:
+            return False
+        
+        # Check obstacles
+        if pos in self.obstacles:
+            return False
+            
+        return True
+    
+    def render(self, episode=None):
+        """Draw the warehouse with the robot's path"""
+        plt.figure(figsize=(12, 5))
+        
+        # Plot 1: Warehouse Map
+        plt.subplot(1, 2, 1)
+        
+        # Create grid
+        grid = np.zeros((self.grid_size, self.grid_size))
+        
+        # Mark positions
+        for i in range(self.grid_size):
+            for j in range(self.grid_size):
+                # Shelves
+                if [i, j] in self.shelves:
+                    grid[i, j] = 2
+                # Obstacles
+                elif [i, j] in self.obstacles:
+                    grid[i, j] = 3
+                # Packing station
+                elif [i, j] == self.packing_station:
+                    grid[i, j] = 4
+        
+        # Show the grid
+        cmap = plt.cm.tab20c
+        cmap.set_under('white')  # Empty space
+        cmap.set_over('red')     # Robot path
+        
+        plt.imshow(grid, cmap=cmap, vmin=0, vmax=5)
+        
+        # Mark robot path
+        path_x, path_y = zip(*self.robot_path)
+        plt.plot(path_y, path_x, 'r-', alpha=0.5, linewidth=2)
+        plt.plot(path_y[-1], path_x[-1], 'ro', markersize=10, label='Robot')
+        
+        # Add legend
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor='lightblue', label='Shelves'),
+            Patch(facecolor='gray', label='Obstacles'),
+            Patch(facecolor='green', label='Packing Station'),
+            Patch(facecolor='red', label='Robot Path')
+        ]
+        plt.legend(handles=legend_elements, loc='upper right')
+        
+        plt.title(f'Warehouse Map\nEpisode: {episode if episode else "Current"}')
+        plt.xlabel('X Position')
+        plt.ylabel('Y Position')
+        
+        # Plot 2: Robot Status
+        plt.subplot(1, 2, 2)
+        
+        status_text = f"""
+        Robot Status:
+        --------------------
+        Position: {self.robot_pos}
+        Carrying Item: {'Yes' if self.carrying_item else 'No'}
+        Items Delivered: {self.items_picked}
+        Steps Taken: {self.steps_taken}
+        Episode Reward: {self.episode_reward:.2f}
+        
+        Current Goal: {'Go to Shelf' if not self.carrying_item else 'Deliver to Station'}
+        """
+        
+        plt.text(0.1, 0.5, status_text, fontsize=12, 
+                verticalalignment='center',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        plt.axis('off')
+        plt.title('Robot Information')
+        
+        plt.tight_layout()
+        plt.show()
+
+# ============================================================================
+# 2. NEURAL NETWORK (The Robot's Brain)
+# ============================================================================
+
+class SimpleNeuralNetwork:
+    """
+    A simple neural network for the PPO algorithm.
+    Think of this as the robot's brain.
+    """
+    
+    def __init__(self, input_size, output_size, learning_rate=0.001):
+        # Initialize weights randomly (small values)
+        self.weights1 = np.random.randn(input_size, 64) * 0.1
+        self.bias1 = np.zeros(64)
+        
+        self.weights2 = np.random.randn(64, 32) * 0.1
+        self.bias2 = np.zeros(32)
+        
+        # Output layers
+        self.actor_weights = np.random.randn(32, output_size) * 0.1
+        self.actor_bias = np.zeros(output_size)
+        
+        self.critic_weights = np.random.randn(32, 1) * 0.1
+        self.critic_bias = np.zeros(1)
+        
+        self.learning_rate = learning_rate
+    
+    def forward(self, x):
+        """Forward pass through the network"""
+        # Layer 1
+        x = np.dot(x, self.weights1) + self.bias1
+        x = np.tanh(x)  # Activation function
+        
+        # Layer 2
+        x = np.dot(x, self.weights2) + self.bias2
+        x = np.tanh(x)
+        
+        # Actor output (action probabilities)
+        actor_output = np.dot(x, self.actor_weights) + self.actor_bias
+        action_probs = self.softmax(actor_output)
+        
+        # Critic output (state value)
+        critic_output = np.dot(x, self.critic_weights) + self.critic_bias
+        
+        return action_probs, critic_output[0]
+    
+    def softmax(self, x):
+        """Convert to probabilities"""
+        exp_x = np.exp(x - np.max(x))  # For numerical stability
+        return exp_x / exp_x.sum()
+    
+    def backward(self, x, actor_grad, critic_grad):
+        """
+        Simple gradient descent update.
+        In real PPO, we'd use more complex updates, but this keeps it simple.
+        """
+        # For simplicity, we'll do a basic update
+        # In practice, PPO has more complex updates to keep changes small
+        
+        # Store gradients (simplified)
+        self.actor_weights -= self.learning_rate * actor_grad * 0.01
+        self.critic_weights -= self.learning_rate * critic_grad * 0.01
+
+# ============================================================================
+# 3. PPO AGENT (The Learning Algorithm)
+# ============================================================================
+
+class PPORobot:
+    """
+    The PPO learning agent. This is what makes the robot learn from experience.
+    """
+    
+    def __init__(self, state_size, action_size):
+        self.state_size = state_size
+        self.action_size = action_size
+        
+        # Create the neural network (robot's brain)
+        self.policy_net = SimpleNeuralNetwork(state_size, action_size)
+        
+        # Storage for experiences
+        self.states = []
+        self.actions = []
+        self.rewards = []
+        self.values = []
+        self.dones = []
+        
+        # Learning parameters
+        self.gamma = 0.99  # Discount factor (how much we value future rewards)
+        self.clip_epsilon = 0.2  # How much we can change the policy at once
+        
+        # Tracking
+        self.episode_rewards = []
+        self.successful_deliveries = []
+    
+    def select_action(self, state):
+        """Choose an action based on current policy"""
+        # Get action probabilities and state value from network
+        action_probs, value = self.policy_net.forward(state)
+        
+        # Choose action (sometimes random for exploration)
+        if random.random() < 0.1:  # 10% chance of random action
+            action = random.randint(0, self.action_size - 1)
+        else:
+            # Choose based on probabilities
+            action = np.random.choice(self.action_size, p=action_probs)
+        
+        # Store for learning
+        self.states.append(state)
+        self.actions.append(action)
+        self.values.append(value)
+        
+        return action
+    
+    def store_experience(self, reward, done):
+        """Store what happened after taking action"""
+        self.rewards.append(reward)
+        self.dones.append(done)
+    
+    def learn(self):
+        """Learn from stored experiences (the core of PPO)"""
+        if len(self.states) < 10:  # Need some experiences first
+            return
+        
+        # Calculate advantages (how good actions were compared to expected)
+        advantages = self._calculate_advantages()
+        
+        # Simple update (for beginners)
+        # In real PPO, we'd do more complex updates with clipping
+        
+        # Update based on experiences
+        for i in range(len(self.states)):
+            state = self.states[i]
+            action = self.actions[i]
+            advantage = advantages[i]
+            
+            # Get current probabilities
+            action_probs, _ = self.policy_net.forward(state)
+            
+            # Calculate gradient for actor (simplified)
+            # This encourages good actions and discourages bad ones
+            actor_grad = np.zeros(self.action_size)
+            actor_grad[action] = advantage
+            
+            # Update critic based on advantage (simplified)
+            critic_grad = np.array([advantage])
+            
+            # Update network
+            self.policy_net.backward(state, actor_grad, critic_grad)
+        
+        # Clear experiences
+        self._clear_memory()
+    
+    def _calculate_advantages(self):
+        """Calculate how much better actions were than expected"""
+        advantages = []
+        returns = []  # Actual returns (rewards + future rewards)
+        
+        # Calculate returns from the end
+        R = 0
+        for reward, done in zip(reversed(self.rewards), reversed(self.dones)):
+            R = reward + self.gamma * R * (not done)
+            returns.insert(0, R)
+        
+        # Calculate advantages (return - value estimate)
+        for ret, val in zip(returns, self.values):
+            advantages.append(ret - val)
+        
+        # Normalize advantages (makes learning more stable)
+        advantages = np.array(advantages)
+        if advantages.std() > 0:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        return advantages
+    
+    def _clear_memory(self):
+        """Clear stored experiences"""
+        self.states = []
+        self.actions = []
+        self.rewards = []
+        self.values = []
+        self.dones = []
+    
+    def record_episode(self, reward, deliveries):
+        """Record episode results"""
+        self.episode_rewards.append(reward)
+        self.successful_deliveries.append(deliveries)
+
+# ============================================================================
+# 4. TRAINING LOOP (Teaching the Robot)
+# ============================================================================
+
+def train_robot(episodes=500, render_every=100):
+    """
+    Train the warehouse robot using PPO.
+    
+    Args:
+        episodes: How many training episodes
+        render_every: Show visualization every N episodes
+    """
+    
+    print("=" * 60)
+    print("TRAINING WAREHOUSE ROBOT")
+    print("=" * 60)
+    print("\nGoal: Pick items from shelves and deliver to packing station")
+    print("The robot learns to avoid obstacles and find optimal paths.\n")
+    
+    # Create environment and agent
+    env = WarehouseEnv()
+    robot = PPORobot(state_size=6, action_size=6)  # 6 state features, 6 actions
+    
+    # For tracking progress
+    all_rewards = []
+    all_deliveries = []
+    
+    for episode in range(1, episodes + 1):
+        # Reset environment for new episode
+        state = env.reset()
+        total_reward = 0
+        done = False
+        
+        while not done:
+            # Robot chooses action
+            action = robot.select_action(state)
+            
+            # Take action in environment
+            next_state, reward, done, info = env.step(action)
+            
+            # Store experience for learning
+            robot.store_experience(reward, done)
+            
+            # Update for next step
+            state = next_state
+            total_reward += reward
+            
+            # Learn every few steps
+            if len(robot.states) >= 32:
+                robot.learn()
+        
+        # Learn at end of episode
+        robot.learn()
+        
+        # Record results
+        robot.record_episode(total_reward, env.items_picked)
+        all_rewards.append(total_reward)
+        all_deliveries.append(env.items_picked)
+        
+        # Show progress
+        if episode % 50 == 0:
+            avg_reward = np.mean(robot.episode_rewards[-50:])
+            avg_deliveries = np.mean(robot.successful_deliveries[-50:])
+            print(f"Episode {episode:4d} | "
+                  f"Avg Reward: {avg_reward:7.2f} | "
+                  f"Avg Deliveries: {avg_deliveries:5.2f} | "
+                  f"Last Reward: {total_reward:7.2f}")
+        
+        # Visualize occasionally
+        if episode % render_every == 0:
+            print(f"\nVisualizing Episode {episode}...")
+            env.render(episode=episode)
+            time.sleep(0.5)  # Pause to see visualization
+    
+    print("\n" + "=" * 60)
+    print("TRAINING COMPLETE!")
+    print("=" * 60)
+    
+    # Plot training results
+    plot_training_results(all_rewards, all_deliveries, episodes)
+    
+    return env, robot
+
+# ============================================================================
+# 5. VISUALIZATION FUNCTIONS
+# ============================================================================
+
+def plot_training_results(rewards, deliveries, episodes):
+    """Plot how the robot learned over time"""
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Plot 1: Rewards over time
+    axes[0, 0].plot(rewards, alpha=0.6, color='blue')
+    axes[0, 0].set_xlabel('Episode')
+    axes[0, 0].set_ylabel('Total Reward')
+    axes[0, 0].set_title('Rewards per Episode')
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # Add moving average
+    window_size = 50
+    moving_avg = np.convolve(rewards, np.ones(window_size)/window_size, mode='valid')
+    axes[0, 0].plot(range(window_size-1, episodes), moving_avg, 
+                   color='red', linewidth=2, label=f'{window_size}-episode MA')
+    axes[0, 0].legend()
+    
+    # Plot 2: Deliveries per episode
+    axes[0, 1].plot(deliveries, alpha=0.6, color='green', marker='o', linestyle='', markersize=3)
+    axes[0, 1].set_xlabel('Episode')
+    axes[0, 1].set_ylabel('Items Delivered')
+    axes[0, 1].set_title('Successful Deliveries per Episode')
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # Plot 3: Histogram of rewards
+    axes[1, 0].hist(rewards, bins=30, color='skyblue', edgecolor='black', alpha=0.7)
+    axes[1, 0].axvline(x=np.mean(rewards), color='red', linestyle='--', 
+                      label=f'Mean: {np.mean(rewards):.2f}')
+    axes[1, 0].set_xlabel('Reward')
+    axes[1, 0].set_ylabel('Frequency')
+    axes[1, 0].set_title('Distribution of Rewards')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # Plot 4: Success rate over time
+    success_rate = []
+    window = 50
+    for i in range(len(deliveries)):
+        start = max(0, i - window + 1)
+        window_deliveries = deliveries[start:i+1]
+        success_rate.append(np.mean(window_deliveries) / 3 * 100)  # 3 is max deliveries
+    
+    axes[1, 1].plot(success_rate, color='purple', linewidth=2)
+    axes[1, 1].set_xlabel('Episode')
+    axes[1, 1].set_ylabel('Success Rate (%)')
+    axes[1, 1].set_title(f'Success Rate (Last {window} episodes)')
+    axes[1, 1].grid(True, alpha=0.3)
+    
+    plt.suptitle('Warehouse Robot Training Results', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    plt.show()
+
+def test_robot(env, robot, num_tests=5):
+    """Test the trained robot"""
+    
+    print("\n" + "=" * 60)
+    print("TESTING TRAINED ROBOT")
+    print("=" * 60)
+    
+    for test in range(num_tests):
+        print(f"\nTest {test + 1}:")
+        print("-" * 40)
+        
+        state = env.reset()
+        done = False
+        steps = 0
+        
+        while not done and steps < 100:
+            # Get action probabilities
+            action_probs, value = robot.policy_net.forward(state)
+            
+            # Choose best action (no randomness during test)
+            action = np.argmax(action_probs)
+            action_name = env.action_meanings[action]
+            
+            # Take action
+            next_state, reward, done, info = env.step(action)
+            
+            steps += 1
+            state = next_state
+            
+            # Print interesting events
+            if 'action' in info:
+                print(f"  Step {steps:3d}: {action_name:15} | {info['action']:20} | Reward: {reward:5.1f}")
+        
+        print(f"\n  Test completed in {steps} steps")
+        print(f"  Items delivered: {env.items_picked}")
+        print(f"  Total reward: {env.episode_reward:.1f}")
+        
+        # Show the path taken
+        env.render(episode=f"Test {test + 1}")
+
+# ============================================================================
+# 6. MAIN FUNCTION (Run Everything)
+# ============================================================================
+
+def main():
+    """Main function to run the warehouse robot simulation"""
+    
+    print("WAREHOUSE ROBOT SIMULATION")
+    print("=" * 60)
+    print("\nThis simulation teaches a robot to:")
+    print("  1. Navigate a warehouse")
+    print("  2. Pick items from shelves")
+    print("  3. Deliver items to packing station")
+    print("  4. Avoid obstacles and find optimal paths")
+    print("\nThe robot learns using PPO (Proximal Policy Optimization)")
+    print("\n" + "=" * 60)
+    
+    # Get user input
+    print("\nTraining Parameters:")
+    episodes = input("How many training episodes? (default: 300): ")
+    episodes = int(episodes) if episodes else 300
+    
+    render_freq = input("Visualize every N episodes? (default: 100): ")
+    render_freq = int(render_freq) if render_freq else 100
+    
+    print("\n" + "=" * 60)
+    print("Starting training... This may take a moment.")
+    print("=" * 60)
+    
+    # Train the robot
+    env, robot = train_robot(episodes=episodes, render_every=render_freq)
+    
+    # Test the robot
+    print("\nWould you like to test the trained robot? (y/n): ")
+    if input().lower() == 'y':
+        test_robot(env, robot, num_tests=3)
+    
+    print("\n" + "=" * 60)
+    print("SIMULATION COMPLETE!")
+    print("=" * 60)
+    
+    print("\nWhat the robot learned:")
+    print("  1. How to navigate from starting point to shelves")
+    print("  2. When to pick up items")
+    print("  3. How to navigate to packing station")
+    print("  4. How to avoid obstacles")
+    print("  5. The shortest paths through the warehouse")
+    
+    print("\nTry modifying the code to:")
+    print("  1. Add more obstacles")
+    print("  2. Change the reward values")
+    print("  3. Make the warehouse larger")
+    print("  4. Add more items to pick up")
+
+# ============================================================================
+# 7. RUN THE SIMULATION
+# ============================================================================
+
+if __name__ == "__main__":
+    main()
