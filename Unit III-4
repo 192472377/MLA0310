@@ -1,0 +1,493 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import random
+from collections import deque
+import math
+
+# Set random seeds for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
+
+class TicTacToe:
+    """Tic-Tac-Toe game environment"""
+    def __init__(self):
+        self.reset()
+    
+    def reset(self):
+        """Reset the game board"""
+        self.board = np.zeros((3, 3), dtype=int)  # 0: empty, 1: X, -1: O
+        self.current_player = 1  # X goes first
+        self.done = False
+        self.winner = 0  # 0: no winner, 1: X wins, -1: O wins, 2: draw
+        return self.get_state()
+    
+    def get_state(self):
+        """Get the current state representation"""
+        # Flatten the board
+        state = self.board.flatten()
+        # Convert to torch tensor with float type
+        return torch.FloatTensor(state)
+    
+    def get_valid_moves(self):
+        """Get list of valid moves"""
+        valid_moves = []
+        for i in range(3):
+            for j in range(3):
+                if self.board[i, j] == 0:
+                    valid_moves.append(i * 3 + j)
+        return valid_moves
+    
+    def step(self, action):
+        """Take an action (place a mark on the board)"""
+        row, col = divmod(action, 3)
+        
+        # Check if the move is valid
+        if self.board[row, col] != 0:
+            return self.get_state(), -10, True, {}  # Penalty for invalid move
+        
+        # Place the mark
+        self.board[row, col] = self.current_player
+        
+        # Check for win
+        if self.check_win(self.current_player):
+            self.done = True
+            self.winner = self.current_player
+            reward = 1 if self.current_player == 1 else -1  # Agent is X
+            return self.get_state(), reward, True, {}
+        
+        # Check for draw
+        if len(self.get_valid_moves()) == 0:
+            self.done = True
+            self.winner = 2
+            return self.get_state(), 0, True, {}
+        
+        # Switch player
+        self.current_player *= -1
+        
+        return self.get_state(), 0, False, {}
+    
+    def check_win(self, player):
+        """Check if the given player has won"""
+        board = self.board
+        
+        # Check rows
+        for i in range(3):
+            if all(board[i, :] == player):
+                return True
+        
+        # Check columns
+        for j in range(3):
+            if all(board[:, j] == player):
+                return True
+        
+        # Check diagonals
+        if all(board[i, i] == player for i in range(3)):
+            return True
+        if all(board[i, 2 - i] == player for i in range(3)):
+            return True
+        
+        return False
+    
+    def render(self):
+        """Display the current board"""
+        symbols = {0: '.', 1: 'X', -1: 'O'}
+        print("  0   1   2")
+        print("  ---------")
+        for i in range(3):
+            print(f"{i}|", end="")
+            for j in range(3):
+                print(f" {symbols[self.board[i, j]]} ", end="")
+                if j < 2:
+                    print("|", end="")
+            print()
+            if i < 2:
+                print("  ---|---|---")
+        print()
+
+class PolicyNetwork(nn.Module):
+    """Neural network for the policy"""
+    def __init__(self, input_size=9, hidden_size=64, output_size=9):
+        super(PolicyNetwork, self).__init__()
+        
+        self.net = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, output_size)
+        )
+    
+    def forward(self, x):
+        return self.net(x)
+
+class VPGAgent:
+    """Vanilla Policy Gradient Agent"""
+    def __init__(self, player_symbol=1):
+        self.policy_net = PolicyNetwork()
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=0.001)
+        self.player_symbol = player_symbol  # 1 for X, -1 for O
+        self.gamma = 0.99  # Discount factor
+        
+        # Store transitions for training
+        self.log_probs = []
+        self.rewards = []
+    
+    def get_action(self, state, valid_moves, training=True):
+        """Select an action based on the current policy"""
+        # Get logits from policy network
+        logits = self.policy_net(state)
+        
+        # Create a mask for valid moves
+        mask = torch.full((9,), float('-inf'))
+        for move in valid_moves:
+            mask[move] = 0
+        
+        # Apply mask to logits
+        masked_logits = logits + mask
+        
+        # Convert to probabilities
+        action_probs = torch.softmax(masked_logits, dim=-1)
+        
+        # Sample an action
+        if training:
+            dist = torch.distributions.Categorical(action_probs)
+            action = dist.sample()
+            # Store log probability for training
+            self.log_probs.append(dist.log_prob(action))
+        else:
+            # During evaluation, choose the best action
+            action = torch.argmax(action_probs)
+        
+        return action.item()
+    
+    def update_policy(self):
+        """Update the policy network using stored rewards"""
+        if not self.log_probs:
+            return 0
+        
+        # Calculate discounted returns
+        returns = []
+        R = 0
+        for r in reversed(self.rewards):
+            R = r + self.gamma * R
+            returns.insert(0, R)
+        
+        returns = torch.tensor(returns, dtype=torch.float32)
+        # Normalize returns
+        if len(returns) > 1:
+            returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+        
+        # Calculate policy loss
+        policy_loss = []
+        for log_prob, R in zip(self.log_probs, returns):
+            policy_loss.append(-log_prob * R)
+        
+        # Update the network
+        self.optimizer.zero_grad()
+        loss = torch.stack(policy_loss).sum()
+        loss.backward()
+        self.optimizer.step()
+        
+        # Clear stored data
+        self.log_probs = []
+        self.rewards = []
+        
+        return loss.item()
+
+def train_agent_simple(episodes=2000):
+    """Train the agent through self-play - simplified for online use"""
+    env = TicTacToe()
+    agent = VPGAgent(player_symbol=1)
+    
+    wins = 0
+    losses = 0
+    draws = 0
+    
+    print("Training agent...")
+    print("=" * 50)
+    
+    for episode in range(episodes):
+        state = env.reset()
+        done = False
+        
+        while not done:
+            # Agent's turn (X)
+            valid_moves = env.get_valid_moves()
+            if not valid_moves:
+                break
+                
+            action = agent.get_action(state, valid_moves)
+            next_state, reward, done, _ = env.step(action)
+            
+            # Store reward for agent
+            agent.rewards.append(reward)
+            
+            if done:
+                # Update statistics
+                if reward == 1:
+                    wins += 1
+                elif reward == -1:
+                    losses += 1
+                else:
+                    draws += 1
+                break
+            
+            state = next_state
+            
+            # Opponent's turn (O) - random moves during training
+            valid_moves = env.get_valid_moves()
+            if valid_moves:
+                opponent_action = random.choice(valid_moves)
+                next_state, _, done, _ = env.step(opponent_action)
+                state = next_state
+        
+        # Update policy every episode
+        agent.update_policy()
+        
+        # Show progress
+        if (episode + 1) % 500 == 0:
+            total = wins + losses + draws
+            win_rate = wins / total if total > 0 else 0
+            loss_rate = losses / total if total > 0 else 0
+            draw_rate = draws / total if total > 0 else 0
+            
+            print(f"Episode {episode + 1}:")
+            print(f"  Win rate: {win_rate:.2f} ({wins}/{total})")
+            print(f"  Loss rate: {loss_rate:.2f} ({losses}/{total})")
+            print(f"  Draw rate: {draw_rate:.2f} ({draws}/{total})")
+            print("-" * 30)
+            
+            # Reset for next window
+            wins = losses = draws = 0
+    
+    print("Training completed!")
+    return agent
+
+def play_against_agent(agent):
+    """Play a game against the trained agent"""
+    env = TicTacToe()
+    state = env.reset()
+    done = False
+    
+    print("\n" + "="*50)
+    print("TIC-TAC-TOE GAME")
+    print("You are O, AI is X")
+    print("Enter moves as row,col (e.g., 0,0 for top-left)")
+    print("="*50 + "\n")
+    
+    # Agent goes first (X)
+    env.render()
+    
+    while not done:
+        # Agent's turn
+        print("\nAI's turn (X):")
+        valid_moves = env.get_valid_moves()
+        if valid_moves:
+            action = agent.get_action(state, valid_moves, training=False)
+            row, col = divmod(action, 3)
+            print(f"AI plays at ({row},{col})")
+            state, _, done, _ = env.step(action)
+            env.render()
+        
+        if done:
+            if env.winner == 1:
+                print("🤖 AI wins!")
+            elif env.winner == 2:
+                print("🤝 It's a draw!")
+            break
+        
+        # Human's turn
+        print("\nYour turn (O):")
+        valid_moves = env.get_valid_moves()
+        if valid_moves:
+            print(f"Valid moves: {[(i//3, i%3) for i in valid_moves]}")
+            
+            while True:
+                try:
+                    move_input = input("Enter your move as row,col: ")
+                    row, col = map(int, move_input.split(','))
+                    move = row * 3 + col
+                    
+                    if move in valid_moves:
+                        break
+                    else:
+                        print(f"Invalid move. That position is already taken or out of bounds.")
+                except ValueError:
+                    print("Please enter coordinates as row,col (e.g., 1,2)")
+                except:
+                    print("Invalid input. Please try again.")
+            
+            state, _, done, _ = env.step(move)
+            env.render()
+        
+        if done:
+            if env.winner == -1:
+                print("🎉 You win!")
+            elif env.winner == 2:
+                print("🤝 It's a draw!")
+
+def train_and_play_quick():
+    """Quick train and play function for online compilers"""
+    print("=" * 60)
+    print("TIC-TAC-TOE AI WITH VANILLA POLICY GRADIENT")
+    print("=" * 60)
+    
+    # Quick training
+    print("\nTraining AI agent (this will take a moment)...")
+    agent = train_agent_simple(episodes=1500)
+    
+    # Play against the agent
+    play_again = 'y'
+    while play_again.lower() == 'y':
+        play_against_agent(agent)
+        play_again = input("\nPlay again? (y/n): ")
+    
+    print("\nThanks for playing!")
+
+def test_agent_performance(agent, num_games=100):
+    """Test the agent's performance against random opponent"""
+    print("\n" + "="*50)
+    print("Testing AI Performance vs Random Opponent")
+    print("="*50)
+    
+    env = TicTacToe()
+    wins = 0
+    losses = 0
+    draws = 0
+    
+    for game in range(num_games):
+        state = env.reset()
+        done = False
+        
+        while not done:
+            # Agent's turn (X)
+            valid_moves = env.get_valid_moves()
+            if valid_moves:
+                action = agent.get_action(state, valid_moves, training=False)
+                next_state, reward, done, _ = env.step(action)
+                state = next_state
+            
+            if done:
+                if reward == 1:
+                    wins += 1
+                elif reward == -1:
+                    losses += 1
+                else:
+                    draws += 1
+                break
+            
+            # Random opponent's turn (O)
+            valid_moves = env.get_valid_moves()
+            if valid_moves:
+                opponent_action = random.choice(valid_moves)
+                next_state, _, done, _ = env.step(opponent_action)
+                state = next_state
+            
+            if done:
+                if env.winner == -1:
+                    losses += 1
+                elif env.winner == 2:
+                    draws += 1
+    
+    print(f"\nResults after {num_games} games:")
+    print(f"AI Wins: {wins} ({wins/num_games*100:.1f}%)")
+    print(f"AI Losses: {losses} ({losses/num_games*100:.1f}%)")
+    print(f"Draws: {draws} ({draws/num_games*100:.1f}%)")
+    print("="*50)
+
+def demo_mode():
+    """Demo mode with quick training and a test game"""
+    print("=" * 60)
+    print("TIC-TAC-TOE AI DEMO")
+    print("=" * 60)
+    
+    # Create and train agent
+    print("\n1. Creating and training AI agent...")
+    agent = train_agent_simple(episodes=1000)
+    
+    # Test performance
+    print("\n2. Testing AI performance...")
+    test_agent_performance(agent, num_games=50)
+    
+    # Demo game
+    print("\n3. Let's play a demo game!")
+    print("   AI will play against itself to show its moves.")
+    
+    env = TicTacToe()
+    state = env.reset()
+    done = False
+    
+    print("\nStarting game (AI vs AI):")
+    env.render()
+    
+    step = 1
+    while not done:
+        # Player X (our trained agent)
+        valid_moves = env.get_valid_moves()
+        if valid_moves:
+            action = agent.get_action(state, valid_moves, training=False)
+            row, col = divmod(action, 3)
+            print(f"\nStep {step}: AI (X) plays at ({row},{col})")
+            state, _, done, _ = env.step(action)
+            env.render()
+            step += 1
+        
+        if done:
+            break
+        
+        # Player O (random moves for demo)
+        valid_moves = env.get_valid_moves()
+        if valid_moves:
+            action = random.choice(valid_moves)
+            row, col = divmod(action, 3)
+            print(f"\nStep {step}: Random (O) plays at ({row},{col})")
+            state, _, done, _ = env.step(action)
+            env.render()
+            step += 1
+    
+    if env.winner == 1:
+        print("\n🏆 Our trained AI (X) wins!")
+    elif env.winner == -1:
+        print("\n😲 Random player (O) wins!")
+    else:
+        print("\n🤝 It's a draw!")
+
+def main_menu():
+    """Simple menu for the program"""
+    print("=" * 60)
+    print("TIC-TAC-TOE AI WITH VANILLA POLICY GRADIENT")
+    print("=" * 60)
+    print("\nOptions:")
+    print("1. Quick Train & Play (Recommended for online compilers)")
+    print("2. Demo Mode (See AI in action)")
+    print("3. Exit")
+    
+    while True:
+        choice = input("\nEnter your choice (1-3): ").strip()
+        
+        if choice == '1':
+            train_and_play_quick()
+            break
+        elif choice == '2':
+            demo_mode()
+            break
+        elif choice == '3':
+            print("Goodbye!")
+            break
+        else:
+            print("Invalid choice. Please enter 1, 2, or 3.")
+
+# Run the program
+if __name__ == "__main__":
+    # Check if we're in an environment that supports interactive input
+    try:
+        main_menu()
+    except KeyboardInterrupt:
+        print("\n\nProgram interrupted. Goodbye!")
+    except Exception as e:
+        print(f"\nAn error occurred: {e}")
+        print("\nRunning in fallback mode (quick demo)...")
+        demo_mode()
